@@ -49,7 +49,7 @@ class SpatialAttentionModule(nn.Module):
 
 
 class CBAM(nn.Module):
-    def __init__(self, c1,c2):
+    def __init__(self, c1):
         super(CBAM, self).__init__()
         self.channel_attention = ChannelAttentionModule(c1)
         self.spatial_attention = SpatialAttentionModule()

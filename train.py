@@ -18,19 +18,12 @@ from evaluate import evaluate
 from unet import UNet,UNetCBAM
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
+from torch.utils.tensorboard import SummaryWriter
 
 dir_img = Path('./data/imgs/train/')
 dir_mask = Path('./data/masks/train/')
-dir_checkpoint = Path('./checkpoints/')
-# 我是让科研变的更简单的叫叫兽！国奖，多篇SCI，深耕目标检测领域，多项竞赛经历，拥有软件著作权，核心期刊等成果。实战派up主，只做干货！让你不走弯路，直冲成果输出！！
+dir_checkpoint = Path('./checkpoints-pro/')
 
-# 大家关注我的B站：Ai学术叫叫兽
-# 链接在这：https://space.bilibili.com/3546623938398505
-# 科研不痛苦，跟着叫兽走！！！
-# 更多捷径——B站干货见！！！
-
-# 本环境和资料纯粉丝福利！！！
-# 必须让我叫叫兽的粉丝有牌面！！！冲吧，青年们，遥遥领先！！！
 
 def train_model(
         model,
@@ -41,7 +34,7 @@ def train_model(
         val_percent: float = 0.1,
         save_checkpoint: bool = True,
         img_scale: float = 0.5,
-        amp: bool = False,
+        amp: bool = True,
         weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
@@ -62,6 +55,9 @@ def train_model(
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir='/root/tf-logs')
+
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
     experiment.config.update(
@@ -80,7 +76,7 @@ def train_model(
         Images scaling:  {img_scale}
         Mixed Precision: {amp}
     ''')
-
+    
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     optimizer = optim.RMSprop(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
@@ -135,6 +131,16 @@ def train_model(
                 })
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
+                # Log to TensorBoard
+                if global_step % 50 == 0:  # Log every 100 steps
+                    # writer.add_image('Train/Image', images[0], global_step)
+                    # writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Add channel dimension
+                    # writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0], global_step)
+                   # Log images, true masks, and predictions to TensorBoard
+                    writer.add_image('Train/Image', images[0], global_step)  # Shape: [3, 128, 128]
+                    writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
+                    writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
+
                 # Evaluation round
                 division_step = (n_train // (5 * batch_size))
                 if division_step > 0:
@@ -147,7 +153,7 @@ def train_model(
                             if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-                        val_score,acc,iou = evaluate(model, val_loader, device, amp)
+                        val_score, acc, iou = evaluate(model, val_loader, device, amp)
                         scheduler.step(val_score)
 
                         logging.info('Validation Dice score: {}'.format(val_score))
@@ -155,8 +161,8 @@ def train_model(
                             experiment.log({
                                 'learning rate': optimizer.param_groups[0]['lr'],
                                 'validation Dice': val_score,
-                                'acc':acc,
-                                'iou':iou,
+                                'acc': acc,
+                                'iou': iou,
                                 'images': wandb.Image(images[0].cpu()),
                                 'masks': {
                                     'true': wandb.Image(true_masks[0].float().cpu()),
@@ -169,6 +175,7 @@ def train_model(
                         except:
                             pass
 
+        # Save checkpoints
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
@@ -176,11 +183,14 @@ def train_model(
             torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
 
+    # Close TensorBoard writer
+    writer.close()
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
@@ -204,7 +214,7 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
-    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    model = UNetCBAM(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'
