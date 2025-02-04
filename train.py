@@ -15,14 +15,68 @@ from tqdm import tqdm
 
 import wandb
 from evaluate import evaluate
-from unet import UNet,UNetCBAM
+from unet import UNet,UNetCBAM,UNetCBAMResnet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 from torch.utils.tensorboard import SummaryWriter
 
-dir_img = Path('./data/imgs/train/')
-dir_mask = Path('./data/masks/train/')
-dir_checkpoint = Path('./checkpoints-pro/')
+dir_img = Path('./data-pre/imgs/train/')
+dir_mask = Path('./data-pre/masks/train/')
+dir_checkpoint = Path('./checkpoints-res-pre/')
+import matplotlib.pyplot as plt
+
+import torch
+import numpy as np
+import time
+def overlay_two_masks(groundtruth_mask, pred_mask, alpha=0.5, pred_alpha=0.5):
+    """
+    将 groundtruth mask 和 prediction mask 叠加在一起，每个 mask 保持透明度。
+    :param groundtruth_mask: 真实标签的 mask [H, W] (0 或 1)
+    :param pred_mask: 预测的 mask [H, W] (0 或 1)
+    :param alpha: groundtruth mask 的透明度
+    :param pred_alpha: prediction mask 的透明度
+    :return: 合成的图像
+    """
+    # 将 groundtruth_mask 和 pred_mask 转为 [H, W] 格式（确保是二进制）
+    groundtruth_mask = groundtruth_mask.squeeze(0).cpu().numpy()
+    pred_mask = pred_mask.squeeze(0).cpu().numpy()
+
+    # 创建一个全黑的背景
+    overlay_image = np.zeros((groundtruth_mask.shape[0], groundtruth_mask.shape[1], 3))
+
+    # 将 groundtruth mask 叠加为绿色 (使用 alpha 混合透明度)
+    overlay_image[groundtruth_mask == 1] = [0, 1, 0]  # 绿色
+    overlay_image = overlay_image * (1 - alpha)  # 调整透明度
+
+    # 将 prediction mask 叠加为红色 (使用 pred_alpha 混合透明度)
+    pred_overlay = np.zeros_like(overlay_image)  # 创建一个空白图层
+    pred_overlay[pred_mask == 1] = [1, 0, 0]  # 红色
+    overlay_image = overlay_image + pred_overlay * pred_alpha  # 混合透明度
+
+    return overlay_image
+
+def overlay_mask_on_image(image, mask, alpha=0.5):
+    """
+    将二进制 mask（0 或 1）叠加到原图上，并调整透明度。
+    :param image: 原始图像 [C, H, W] (C: 通道数, H: 高度, W: 宽度)
+    :param mask: 预测的二进制 mask [H, W] (0 或 1)
+    :param alpha: mask 的透明度
+    :return: 合成的图像
+    """
+    # 将图像转换为 [H, W, C] 格式（从 [C, H, W] 转换）
+    image = image.permute(1, 2, 0).cpu().numpy()
+
+    # 将 mask 转为 [H, W] 格式（确保是二进制）
+    mask = mask.squeeze(0).cpu().numpy()  # 假设 mask 是 [1, H, W]，去掉通道维度
+
+    # 创建一个白色的 mask 图像
+    mask_overlay = np.zeros_like(image)  # 初始化为黑色
+    mask_overlay[mask == 1] = [1, 1, 1]  # 只在 mask == 1 的地方设置为白色
+
+    # 将原始图像和 mask 合成
+    overlay = image * (1 - alpha) + mask_overlay * alpha  # 调整透明度，创建合成图像
+
+    return overlay
 
 
 def train_model(
@@ -56,8 +110,10 @@ def train_model(
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
     # Initialize TensorBoard writer
-    writer = SummaryWriter(log_dir='/root/tf-logs')
+    log_dir = f'/root/tf-logs/{time.strftime("%Y-%m-%d_%H-%M-%S")}'
 
+    # 创建 TensorBoard writer
+    writer = SummaryWriter(log_dir=log_dir)
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
     experiment.config.update(
@@ -124,6 +180,8 @@ def train_model(
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
+                writer.add_scalar('Loss/Train-CBAM-res', loss.item(), global_step)
+                writer.add_scalar('Learning Rate-CBAM-res', optimizer.param_groups[0]['lr'], global_step)
                 experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
@@ -137,9 +195,22 @@ def train_model(
                     # writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Add channel dimension
                     # writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0], global_step)
                    # Log images, true masks, and predictions to TensorBoard
-                    writer.add_image('Train/Image', images[0], global_step)  # Shape: [3, 128, 128]
-                    writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
-                    writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
+                    overlay_image = overlay_two_masks(
+                        true_masks[0],  # Ground truth mask
+                        masks_pred.argmax(dim=1)[0],  # Prediction mask
+                        alpha=0.5,  # Ground truth mask 的透明度
+                        pred_alpha=0.7  # Prediction mask 的透明度
+                    )
+
+                    # 将合成图像记录到 TensorBoard
+                    writer.add_image('Train-CBAM-Res/MaskOverlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
+                    overlay_image = overlay_mask_on_image(images[0], masks_pred.argmax(dim=1)[0])
+
+                    # 将合成图像记录到 TensorBoard
+                    writer.add_image('Train-CBAM-Res/Overlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
+                    writer.add_image('Train-CBAM-Res/Image', images[0], global_step)  # Shape: [3, 128, 128]
+                    writer.add_image('Train-CBAM-Res/Mask', true_masks[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
+                    writer.add_image('Train-CBAM-Res/Prediction', masks_pred.argmax(dim=1)[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
 
                 # Evaluation round
                 division_step = (n_train // (5 * batch_size))
@@ -154,6 +225,9 @@ def train_model(
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
                         val_score, acc, iou = evaluate(model, val_loader, device, amp)
+                        writer.add_scalar('Dice/Val-CBAM-res', val_score, global_step)
+                        writer.add_scalar('Accuracy/Val-CBAM-res', acc, global_step)
+                        writer.add_scalar('IoU/Val-CBAM-res', iou, global_step)
                         scheduler.step(val_score)
 
                         logging.info('Validation Dice score: {}'.format(val_score))
@@ -214,7 +288,7 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
-    model = UNetCBAM(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    model = UNetCBAMResnet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'

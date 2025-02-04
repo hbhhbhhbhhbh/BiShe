@@ -20,10 +20,39 @@ from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 from torch.utils.tensorboard import SummaryWriter
 
-dir_img = Path('./data/imgs/train/')
-dir_mask = Path('./data/masks/train/')
+dir_img = Path('./data-pre/imgs/train/')
+dir_mask = Path('./data-pre/masks/train/')
 dir_checkpoint = Path('./checkpoints-pro/')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 
+def overlay_images(image, mask, alpha=0.5):
+    """
+    将mask叠加到图像上，返回合成图像
+    :param image: 原始图像 [C, H, W]
+    :param mask: 预测的mask [H, W] 或 [C, H, W] (用于多类)
+    :param alpha: 透明度
+    :return: 合成的图像
+    """
+    # 如果是单通道 mask，扩展为与图像一样的通道数
+    if len(mask.shape) == 2:
+        mask = mask.unsqueeze(0)
+    
+    # 将图像转换为 [H, W, C] 格式（从 [C, H, W] 转换）
+    image = image.permute(1, 2, 0).cpu().numpy()
+
+    # 将 mask 转为 [H, W] 格式，如果是多类，将其转换为一个颜色图
+    mask = mask.squeeze(0).cpu().numpy()
+    
+    # 创建一个彩色 mask（可以调整 mask 的颜色，进行一些调色）
+    cmap = plt.get_cmap('jet')  # 使用 'jet' colormap，或者你可以自定义
+    mask_color = cmap(mask)  # [H, W, 4] (RGBA)
+
+    # 叠加图像和 mask，设置 alpha 通道的透明度
+    overlay = image * (1 - alpha) + mask_color[:, :, :3] * alpha  # [H, W, C]
+
+    return overlay
 
 def train_model(
         model,
@@ -113,7 +142,7 @@ def train_model(
                             F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
                             multiclass=True
                         )
-
+                
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
                 grad_scaler.unscale_(optimizer)
@@ -124,6 +153,9 @@ def train_model(
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
+                writer.add_scalar('Loss/Train-CBAM', loss.item(), global_step)
+                writer.add_scalar('Learning Rate-CBAM', optimizer.param_groups[0]['lr'], global_step)
+
                 experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
@@ -137,9 +169,13 @@ def train_model(
                     # writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Add channel dimension
                     # writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0], global_step)
                    # Log images, true masks, and predictions to TensorBoard
-                    writer.add_image('Train/Image', images[0], global_step)  # Shape: [3, 128, 128]
-                    writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
-                    writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
+                    overlay_image = overlay_images(images[0], masks_pred.argmax(dim=1)[0])
+
+                    # 将合成图像记录到 TensorBoard
+                    writer.add_image('Train-CBAM/Overlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
+                    writer.add_image('Train-CBAM/Image', images[0], global_step)  # Shape: [3, 128, 128]
+                    writer.add_image('Train-CBAM/Mask', true_masks[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
+                    writer.add_image('Train-CBAM/Prediction', masks_pred.argmax(dim=1)[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
 
                 # Evaluation round
                 division_step = (n_train // (5 * batch_size))
@@ -154,6 +190,9 @@ def train_model(
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
                         val_score, acc, iou = evaluate(model, val_loader, device, amp)
+                        writer.add_scalar('Dice/Val-CBAM', val_score, global_step)
+                        writer.add_scalar('Accuracy/Val-CBAM', acc, global_step)
+                        writer.add_scalar('IoU/Val-CBAM', iou, global_step)
                         scheduler.step(val_score)
 
                         logging.info('Validation Dice score: {}'.format(val_score))
