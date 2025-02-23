@@ -189,3 +189,4 @@ Original paper by Olaf Ronneberger, Philipp Fischer, Thomas Brox:
 ![network architecture](https://i.imgur.com/jeDVpqF.png)
 # UNet
 # BiShe
+# BiShe
