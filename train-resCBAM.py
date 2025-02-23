@@ -15,19 +15,50 @@ from tqdm import tqdm
 
 import wandb
 from evaluate import evaluate
-from unet import UNet,UNetCBAM,UNetCBAMResnet
+from unet.resCBAM import UnetWithCBAM
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 from torch.utils.tensorboard import SummaryWriter
 
 dir_img = Path('./data-pre/imgs/train/')
 dir_mask = Path('./data-pre/masks/train/')
-dir_checkpoint = Path('./checkpoints-pre/')
+dir_checkpoint = Path('./checkpoints-res-pre/')
 import matplotlib.pyplot as plt
 
 import torch
 import numpy as np
 import time
+from torch import Tensor
+class SurfaceLoss():
+    def __init__(self, **kwargs):
+        self.idc: List[int] = kwargs["idc"]
+        print(f"Initialized {self.__class__.__name__} with {kwargs}")
+
+    def __call__(self, probs: Tensor, dist_maps: Tensor) -> Tensor:
+        assert simplex(probs)
+        assert not one_hot(dist_maps)
+
+        pc = probs[:, self.idc, ...].type(torch.float32)
+        dc = dist_maps[:, self.idc, ...].type(torch.float32)
+
+        multipled = einsum("bkwh,bkwh->bkwh", pc, dc)
+
+        loss = multipled.mean()
+
+        return loss
+class CombinedLoss(nn.Module):
+    def __init__(self, idc, surface_loss_weight=1.0):
+        super(CombinedLoss, self).__init__()
+        self.idc = idc
+        self.surface_loss_weight = surface_loss_weight
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.surface_loss = SurfaceLoss(idc=idc)
+
+    def forward(self, logits, edge_logits, targets, dist_maps):
+        ce_loss = self.ce_loss(logits, targets)
+        surface_loss = self.surface_loss(edge_logits, dist_maps)
+        total_loss = ce_loss + self.surface_loss_weight * surface_loss
+        return total_loss
 def overlay_two_masks(groundtruth_mask, pred_mask, alpha=0.5, pred_alpha=0.5):
     """
     将 groundtruth mask 和 prediction mask 叠加在一起，每个 mask 保持透明度。
@@ -78,6 +109,7 @@ def overlay_mask_on_image(image, mask, alpha=0.5):
 
     return overlay
 
+from utils.distance_transform import one_hot2dist
 
 def train_model(
         model,
@@ -111,10 +143,7 @@ def train_model(
 
     # Initialize TensorBoard writer
     log_dir = f'/root/tf-logs/{time.strftime("%Y-%m-%d_%H-%M-%S")}'
-
-    # 创建 TensorBoard writer
     writer = SummaryWriter(log_dir=log_dir)
-    # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
     experiment.config.update(
         dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
@@ -132,13 +161,13 @@ def train_model(
         Images scaling:  {img_scale}
         Mixed Precision: {amp}
     ''')
-    
+
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     optimizer = optim.RMSprop(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
-    criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
+    criterion = CombinedLoss(idc=[1], surface_loss_weight=1.0)
     global_step = 0
 
     # 5. Begin training
@@ -149,26 +178,16 @@ def train_model(
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
 
-                assert images.shape[1] == model.n_channels, \
-                    f'Network has been defined with {model.n_channels} input channels, ' \
-                    f'but loaded images have {images.shape[1]} channels. Please check that ' \
-                    'the images are loaded correctly.'
-
                 images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
                 true_masks = true_masks.to(device=device, dtype=torch.long)
 
+                # 生成距离图
+                # dist_maps = torch.tensor([one_hot2dist(m.numpy()) for m in true_masks], device=device)
+                # 生成距离图
+                dist_maps = torch.tensor([one_hot2dist(m.cpu().numpy()) for m in true_masks], device=device)
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                    masks_pred = model(images)
-                    if model.n_classes == 1:
-                        loss = criterion(masks_pred.squeeze(1), true_masks.float())
-                        loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
-                    else:
-                        loss = criterion(masks_pred, true_masks)
-                        loss += dice_loss(
-                            F.softmax(masks_pred, dim=1).float(),
-                            F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
-                            multiclass=True
-                        )
+                    logits, edge_logits = model(images)
+                    loss = criterion(logits, edge_logits, true_masks, dist_maps)
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -180,69 +199,14 @@ def train_model(
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
-                writer.add_scalar('Loss/Train', loss.item(), global_step)
-                writer.add_scalar('Learning Rate', optimizer.param_groups[0]['lr'], global_step)
+                writer.add_scalar('Loss/Train-CBAM-res', loss.item(), global_step)
+                writer.add_scalar('Learning Rate-CBAM-res', optimizer.param_groups[0]['lr'], global_step)
                 experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
                     'epoch': epoch
                 })
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
-
-                # Log to TensorBoard
-                if global_step % 50 == 0:  # Log every 100 steps
-                    # writer.add_image('Train/Image', images[0], global_step)
-                    # writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Add channel dimension
-                    # writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0], global_step)
-                   # Log images, true masks, and predictions to TensorBoard
-                    overlay_image = overlay_two_masks(
-                        true_masks[0],  # Ground truth mask
-                        masks_pred.argmax(dim=1)[0],  # Prediction mask
-                        alpha=0.5,  # Ground truth mask 的透明度
-                        pred_alpha=0.7  # Prediction mask 的透明度
-                    )
-
-                    # 将合成图像记录到 TensorBoard
-                    writer.add_image('Train/MaskOverlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
-                    overlay_image = overlay_mask_on_image(images[0], masks_pred.argmax(dim=1)[0])
-
-                    # 将合成图像记录到 TensorBoard
-                    writer.add_image('Train/Overlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
-                    writer.add_image('Train/Image', images[0], global_step)  # Shape: [3, 128, 128]
-                    writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
-                    writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
-
-                # Evaluation round
-                division_step = (n_train // (5 * batch_size))
-                if division_step > 0:
-                    if global_step % division_step == 0:
-                        histograms = {}
-                        
-
-                        val_score, acc, iou = evaluate(model, val_loader, device, amp)
-                        writer.add_scalar('Dice/Val', val_score, global_step)
-                        writer.add_scalar('Accuracy/Val', acc, global_step)
-                        writer.add_scalar('IoU/Val', iou, global_step)
-                        scheduler.step(val_score)
-
-                        logging.info('Validation Dice score: {}'.format(val_score))
-                        try:
-                            experiment.log({
-                                'learning rate': optimizer.param_groups[0]['lr'],
-                                'validation Dice': val_score,
-                                'acc': acc,
-                                'iou': iou,
-                                'images': wandb.Image(images[0].cpu()),
-                                'masks': {
-                                    'true': wandb.Image(true_masks[0].float().cpu()),
-                                    'pred': wandb.Image(masks_pred.argmax(dim=1)[0].float().cpu()),
-                                },
-                                'step': global_step,
-                                'epoch': epoch,
-                                **histograms
-                            })
-                        except:
-                            pass
 
         # Save checkpoints
         if save_checkpoint:
@@ -283,13 +247,13 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
-    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    model = UnetWithCBAM(n_classes=args.classes)
     model = model.to(memory_format=torch.channels_last)
 
-    logging.info(f'Network:\n'
-                 f'\t{model.n_channels} input channels\n'
-                 f'\t{model.n_classes} output channels (classes)\n'
-                 f'\t{"Bilinear" if model.bilinear else "Transposed conv"} upscaling')
+    # logging.info(f'Network:\n'
+    #              f'\t{model.n_channels} input channels\n'
+    #              f'\t{model.n_classes} output channels (classes)\n'
+    #              f'\t{"Bilinear" if model.bilinear else "Transposed conv"} upscaling')
 
     if args.load:
         state_dict = torch.load(args.load, map_location=device)
@@ -325,12 +289,3 @@ if __name__ == '__main__':
             val_percent=args.val / 100,
             amp=args.amp
         )
-#我是让科研变的更简单的叫叫兽！国奖，多篇SCI，深耕目标检测领域，多项竞赛经历，拥有软件著作权，核心期刊等成果。实战派up主，只做干货！让你不走弯路，直冲成果输出！！
-
-# 大家关注我的B站：Ai学术叫叫兽
-# 链接在这：https://space.bilibili.com/3546623938398505
-# 科研不痛苦，跟着叫兽走！！！
-# 更多捷径——B站干货见！！！
-
-# 本环境和资料纯粉丝福利！！！
-# 必须让我叫叫兽的粉丝有牌面！！！冲吧，青年们，遥遥领先！！！

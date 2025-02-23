@@ -1,3 +1,4 @@
+# train-dualbranch.py
 import argparse
 import logging
 import os
@@ -12,22 +13,41 @@ from pathlib import Path
 from torch import optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
-
+import time
 import wandb
+import numpy as np
+import matplotlib.pyplot as plt
 from evaluate import evaluate
-from unet import UNet,UNetCBAM,UNetCBAMResnet
+from unet.Dulbranch import DualBranchUNetCBAMResnet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 from torch.utils.tensorboard import SummaryWriter
+from utils.distance_transform import one_hot2dist, SurfaceLoss
+# train-dualbranch.py
+class CombinedLoss(nn.Module):
+    def __init__(self, idc, surface_loss_weight=0.5):
+        super(CombinedLoss, self).__init__()
+        self.idc = idc
+        self.surface_loss_weight = surface_loss_weight
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.surface_loss = SurfaceLoss(idc=idc)
 
+    def forward(self, logits, edge_logits, targets, dist_maps,writer,global_step):
+        ce_loss = self.ce_loss(logits, targets)
+        
+        # print("dist_maps: ",dist_maps)
+        edge_logits = torch.sigmoid(edge_logits)
+        # print("edge: ",edge_logits)
+        surface_loss = self.surface_loss(edge_logits, dist_maps)
+        # print("ce_loss :",ce_loss)
+        print("surface_loss: ",surface_loss)
+        writer.add_scalar('surface_loss/surface_loss', surface_loss, global_step)
+        total_loss = ce_loss + self.surface_loss_weight * surface_loss
+        return total_loss
 dir_img = Path('./data-pre/imgs/train/')
 dir_mask = Path('./data-pre/masks/train/')
-dir_checkpoint = Path('./checkpoints-pre/')
-import matplotlib.pyplot as plt
+dir_checkpoint = Path('./checkpoints-res-dual-pre/')
 
-import torch
-import numpy as np
-import time
 def overlay_two_masks(groundtruth_mask, pred_mask, alpha=0.5, pred_alpha=0.5):
     """
     将 groundtruth mask 和 prediction mask 叠加在一起，每个 mask 保持透明度。
@@ -78,7 +98,6 @@ def overlay_mask_on_image(image, mask, alpha=0.5):
 
     return overlay
 
-
 def train_model(
         model,
         device,
@@ -111,15 +130,7 @@ def train_model(
 
     # Initialize TensorBoard writer
     log_dir = f'/root/tf-logs/{time.strftime("%Y-%m-%d_%H-%M-%S")}'
-
-    # 创建 TensorBoard writer
     writer = SummaryWriter(log_dir=log_dir)
-    # (Initialize logging)
-    experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
-    experiment.config.update(
-        dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-             val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
-    )
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -132,13 +143,13 @@ def train_model(
         Images scaling:  {img_scale}
         Mixed Precision: {amp}
     ''')
-    
+
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     optimizer = optim.RMSprop(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
-    criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
+    criterion = CombinedLoss(idc=[1], surface_loss_weight=0.5)
     global_step = 0
 
     # 5. Begin training
@@ -149,29 +160,20 @@ def train_model(
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
 
-                assert images.shape[1] == model.n_channels, \
-                    f'Network has been defined with {model.n_channels} input channels, ' \
-                    f'but loaded images have {images.shape[1]} channels. Please check that ' \
-                    'the images are loaded correctly.'
-
                 images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
                 true_masks = true_masks.to(device=device, dtype=torch.long)
 
-                with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                    masks_pred = model(images)
-                    if model.n_classes == 1:
-                        loss = criterion(masks_pred.squeeze(1), true_masks.float())
-                        loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
-                    else:
-                        loss = criterion(masks_pred, true_masks)
-                        loss += dice_loss(
-                            F.softmax(masks_pred, dim=1).float(),
-                            F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
-                            multiclass=True
-                        )
+                # 生成距离图
+                dist_maps_single = torch.tensor(one_hot2dist(true_masks.cpu().numpy()), device=device)
+                dist_maps = torch.cat([dist_maps_single, dist_maps_single], dim=1)  # 复制第一个通道创建第二个通道
 
+                with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
+                    masks_pred, edge_logits = model(images)
+                    loss = criterion(masks_pred, edge_logits, true_masks, dist_maps,writer,global_step)
+                    total_loss = loss
+                    print("loss: ",total_loss)
                 optimizer.zero_grad(set_to_none=True)
-                grad_scaler.scale(loss).backward()
+                grad_scaler.scale(total_loss).backward()
                 grad_scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
                 grad_scaler.step(optimizer)
@@ -179,17 +181,12 @@ def train_model(
 
                 pbar.update(images.shape[0])
                 global_step += 1
-                epoch_loss += loss.item()
-                writer.add_scalar('Loss/Train', loss.item(), global_step)
-                writer.add_scalar('Learning Rate', optimizer.param_groups[0]['lr'], global_step)
-                experiment.log({
-                    'train loss': loss.item(),
-                    'step': global_step,
-                    'epoch': epoch
-                })
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
-
-                # Log to TensorBoard
+                epoch_loss += total_loss.item()
+                writer.add_scalar('Loss/Train-dual-res', total_loss.item(), global_step)
+                writer.add_scalar('Learning Rate-dual-res', optimizer.param_groups[0]['lr'], global_step)
+                pbar.set_postfix(**{'loss (batch)': total_loss.item()})
+                if epoch >epoch*0.8:
+                    criterion.surface_loss_weight=1.5
                 if global_step % 50 == 0:  # Log every 100 steps
                     # writer.add_image('Train/Image', images[0], global_step)
                     # writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Add channel dimension
@@ -203,14 +200,14 @@ def train_model(
                     )
 
                     # 将合成图像记录到 TensorBoard
-                    writer.add_image('Train/MaskOverlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
+                    writer.add_image('Train-dual-Res/MaskOverlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
                     overlay_image = overlay_mask_on_image(images[0], masks_pred.argmax(dim=1)[0])
 
                     # 将合成图像记录到 TensorBoard
-                    writer.add_image('Train/Overlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
-                    writer.add_image('Train/Image', images[0], global_step)  # Shape: [3, 128, 128]
-                    writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
-                    writer.add_image('Train/Prediction', masks_pred.argmax(dim=1)[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
+                    writer.add_image('Train-dual-Res/Overlay', torch.tensor(overlay_image).permute(2, 0, 1), global_step)
+                    writer.add_image('Train-dual-Res/Image', images[0], global_step)  # Shape: [3, 128, 128]
+                    writer.add_image('Train-dual-Res/Mask', true_masks[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
+                    writer.add_image('Train-dual-Res/Prediction', masks_pred.argmax(dim=1)[0].unsqueeze(0), global_step)  # Shape: [1, 128, 128]
 
                 # Evaluation round
                 division_step = (n_train // (5 * batch_size))
@@ -220,9 +217,9 @@ def train_model(
                         
 
                         val_score, acc, iou = evaluate(model, val_loader, device, amp)
-                        writer.add_scalar('Dice/Val', val_score, global_step)
-                        writer.add_scalar('Accuracy/Val', acc, global_step)
-                        writer.add_scalar('IoU/Val', iou, global_step)
+                        writer.add_scalar('Dice/Val-dual-res', val_score, global_step)
+                        writer.add_scalar('Accuracy/Val-dual-res', acc, global_step)
+                        writer.add_scalar('IoU/Val-dual-res', iou, global_step)
                         scheduler.step(val_score)
 
                         logging.info('Validation Dice score: {}'.format(val_score))
@@ -243,7 +240,6 @@ def train_model(
                             })
                         except:
                             pass
-
         # Save checkpoints
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
@@ -254,7 +250,6 @@ def train_model(
 
     # Close TensorBoard writer
     writer.close()
-
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
@@ -272,7 +267,6 @@ def get_args():
 
     return parser.parse_args()
 
-
 if __name__ == '__main__':
     args = get_args()
 
@@ -280,16 +274,8 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    # Change here to adapt to your data
-    # n_channels=3 for RGB images
-    # n_classes is the number of probabilities you want to get per pixel
-    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    model = DualBranchUNetCBAMResnet(n_classes=args.classes, n_channels=3)
     model = model.to(memory_format=torch.channels_last)
-
-    logging.info(f'Network:\n'
-                 f'\t{model.n_channels} input channels\n'
-                 f'\t{model.n_classes} output channels (classes)\n'
-                 f'\t{"Bilinear" if model.bilinear else "Transposed conv"} upscaling')
 
     if args.load:
         state_dict = torch.load(args.load, map_location=device)
@@ -325,12 +311,3 @@ if __name__ == '__main__':
             val_percent=args.val / 100,
             amp=args.amp
         )
-#我是让科研变的更简单的叫叫兽！国奖，多篇SCI，深耕目标检测领域，多项竞赛经历，拥有软件著作权，核心期刊等成果。实战派up主，只做干货！让你不走弯路，直冲成果输出！！
-
-# 大家关注我的B站：Ai学术叫叫兽
-# 链接在这：https://space.bilibili.com/3546623938398505
-# 科研不痛苦，跟着叫兽走！！！
-# 更多捷径——B站干货见！！！
-
-# 本环境和资料纯粉丝福利！！！
-# 必须让我叫叫兽的粉丝有牌面！！！冲吧，青年们，遥遥领先！！！

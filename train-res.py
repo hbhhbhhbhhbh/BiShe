@@ -20,8 +20,8 @@ from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 from torch.utils.tensorboard import SummaryWriter
 
-dir_img = Path('./data-pre/imgs/train/')
-dir_mask = Path('./data-pre/masks/train/')
+dir_img = Path('./data/imgs/train/')
+dir_mask = Path('./data/masks/train/')
 dir_checkpoint = Path('./checkpoints-res-pre/')
 import matplotlib.pyplot as plt
 
@@ -217,12 +217,7 @@ def train_model(
                 if division_step > 0:
                     if global_step % division_step == 0:
                         histograms = {}
-                        for tag, value in model.named_parameters():
-                            tag = tag.replace('/', '.')
-                            if not (torch.isinf(value) | torch.isnan(value)).any():
-                                histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
-                                histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
+                        
 
                         val_score, acc, iou = evaluate(model, val_loader, device, amp)
                         writer.add_scalar('Dice/Val-CBAM-res', val_score, global_step)
@@ -264,7 +259,7 @@ def train_model(
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=16, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')

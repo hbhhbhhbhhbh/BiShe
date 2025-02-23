@@ -3,6 +3,7 @@
 from .unet_parts import *
 from .CBAM import *
 from .resnet import resnet50
+
 class UNetCBAMResnet(nn.Module):
     def __init__(self, n_channels, n_classes, bilinear=False):
         super(UNetCBAMResnet, self).__init__()

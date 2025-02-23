@@ -31,7 +31,7 @@ def evaluate(net, dataloader, device, amp):
             mask_true = mask_true.to(device=device, dtype=torch.long)
 
             # predict the mask
-            mask_pred = net(image)
+            mask_pred,_ = net(image)
 
             if net.n_classes == 1:
                 # For binary classification
