@@ -16,9 +16,16 @@ class DualBranchUNetCBAMResnet(nn.Module):
 
         factor = 2 if bilinear else 1
 
-        # 使用 ResNet50 作为特征提取器
-        self.resnet = resnet50(pretrained=False)
-
+        # # 使用 ResNet50 作为特征提取器
+        # self.resnet = resnet50(pretrained=False)
+        self.inc = (DoubleConv(n_channels, 64))
+        self.down1 = (Down(64, 128))
+        self.down2 = (Down(128, 256))
+        self.down3 = (Down(256, 512))
+        factor = 2 if bilinear else 1
+        self.down4 = (Down(512, 1024 // factor))
+        
+        
         # 主体分割分支
         self.up1 = Up(1024, 512 // factor, bilinear)
         self.up2 = Up(512, 256 // factor, bilinear)
@@ -40,8 +47,12 @@ class DualBranchUNetCBAMResnet(nn.Module):
         self.edge_detector = EdgeDetectionModule()
 
     def forward(self, x):
-        [x1, x2, x3, x4, x5] = self.resnet.forward(x)
-
+        # [x1, x2, x3, x4, x5] = self.resnet.forward(x)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
         # 主体分割分支
         x = self.up1(x5, x4)
         x = self.cbam(x)
@@ -60,12 +71,12 @@ class DualBranchUNetCBAMResnet(nn.Module):
 
         # 特征融合
         edge_features = self.edge_detector(edge_logits)
-        fused_logits = logits + edge_features
-
-        return fused_logits, edge_logits
+        fused_logits = logits+edge_features
+        # print("logits: ",logits.shape)
+        return fused_logits,edge_logits
 
     def use_checkpointing(self):
-        self.resnet = torch.utils.checkpoint(self.resnet)
+        # self.resnet = torch.utils.checkpoint(self.resnet)
         self.up1 = torch.utils.checkpoint(self.up1)
         self.up2 = torch.utils.checkpoint(self.up2)
         self.up3 = torch.utils.checkpoint(self.up3)

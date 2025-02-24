@@ -42,7 +42,7 @@ class CombinedLoss(nn.Module):
         # print("ce_loss :",ce_loss)
         print("surface_loss: ",surface_loss)
         writer.add_scalar('surface_loss/surface_loss', surface_loss, global_step)
-        total_loss = ce_loss + self.surface_loss_weight * surface_loss
+        total_loss = ce_loss +surface_loss
         return total_loss
 dir_img = Path('./data-pre/imgs/train/')
 dir_mask = Path('./data-pre/masks/train/')
@@ -170,7 +170,12 @@ def train_model(
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     masks_pred, edge_logits = model(images)
                     loss = criterion(masks_pred, edge_logits, true_masks, dist_maps,writer,global_step)
-                    total_loss = loss
+                    print("masks_pred: ",masks_pred.shape)
+                    total_loss = loss+dice_loss(
+                            F.softmax(masks_pred, dim=1).float(),
+                            F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
+                            multiclass=True
+                        )
                     print("loss: ",total_loss)
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(total_loss).backward()

@@ -19,9 +19,9 @@ from unet import UNet,UNetCBAM,UNetCBAMResnet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 from torch.utils.tensorboard import SummaryWriter
-
-dir_img = Path('./data/imgs/train/')
-dir_mask = Path('./data/masks/train/')
+from unet.Dulbranch import DualBranchUNetCBAMResnet
+dir_img = Path('./data-pre/imgs/train/')
+dir_mask = Path('./data-pre/masks/train/')
 dir_checkpoint = Path('./checkpoints-res-pre/')
 import matplotlib.pyplot as plt
 
@@ -259,7 +259,7 @@ def train_model(
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=16, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')

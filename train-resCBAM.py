@@ -184,9 +184,9 @@ def train_model(
                 # 生成距离图
                 # dist_maps = torch.tensor([one_hot2dist(m.numpy()) for m in true_masks], device=device)
                 # 生成距离图
-                dist_maps = torch.tensor([one_hot2dist(m.cpu().numpy()) for m in true_masks], device=device)
+                # dist_maps = torch.tensor([one_hot2dist(m.cpu().numpy()) for m in true_masks], device=device)
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                    logits, edge_logits = model(images)
+                    logits = model(images)
                     loss = criterion(logits, edge_logits, true_masks, dist_maps)
 
                 optimizer.zero_grad(set_to_none=True)
