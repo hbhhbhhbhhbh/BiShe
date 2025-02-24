@@ -18,7 +18,7 @@ import wandb
 import numpy as np
 import matplotlib.pyplot as plt
 from evaluate import evaluate
-from unet.Dulbranch import DualBranchUNetCBAMResnet
+from unet.Dulbranch_res import DualBranchUNetCBAMResnet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 from torch.utils.tensorboard import SummaryWriter
