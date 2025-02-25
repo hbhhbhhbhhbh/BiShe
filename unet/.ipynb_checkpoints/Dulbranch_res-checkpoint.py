@@ -10,6 +10,7 @@ from .edge_detection import EdgeDetectionModule
 class DualBranchUNetCBAMResnet(nn.Module):
     def __init__(self, n_channels, n_classes, bilinear=False):
         super(DualBranchUNetCBAMResnet, self).__init__()
+        self.name="DBUCR"
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
@@ -73,19 +74,19 @@ class DualBranchUNetCBAMResnet(nn.Module):
         x = self.up4(x, x1)
         logits = self.outc(x)
 
-        # 边缘分割分支
-        edge_x = self.edge_up1(x5, x4)
-        edge_x = self.cbam(edge_x)
-        edge_x = self.edge_up2(edge_x, x3)
-        edge_x = self.edge_up3(edge_x, x2)
-        edge_x = self.edge_up4(edge_x, x1)
-        edge_logits = self.edge_outc(edge_x)
+#         # 边缘分割分支
+#         edge_x = self.edge_up1(x5, x4)
+#         edge_x = self.cbam(edge_x)
+#         edge_x = self.edge_up2(edge_x, x3)
+#         edge_x = self.edge_up3(edge_x, x2)
+#         edge_x = self.edge_up4(edge_x, x1)
+#         edge_logits = self.edge_outc(edge_x)
 
         # 特征融合
-        edge_features = self.edge_detector(edge_logits)
+        edge_features = self.edge_detector(logits)
         fused_logits = logits + edge_features
 
-        return fused_logits, edge_logits
+        return fused_logits,logits
     def use_checkpointing(self):
         # self.resnet = torch.utils.checkpoint(self.resnet)
         self.up1 = torch.utils.checkpoint(self.up1)

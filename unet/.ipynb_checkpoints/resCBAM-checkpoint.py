@@ -28,7 +28,7 @@ class UnetWithCBAM(nn.Module):
         self.n_classes = n_classes
         self.resnet = resnet50(pretrained=pretrained)
         in_filters = [192, 512, 1024, 3072]
-       
+        self.name="UCR"
         out_filters = [64, 128, 256, 512]
 
         # 替换为带 CBAM 的上采样模块

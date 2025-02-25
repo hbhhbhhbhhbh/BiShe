@@ -44,9 +44,9 @@ class CombinedLoss(nn.Module):
         writer.add_scalar('surface_loss/surface_loss', surface_loss, global_step)
         total_loss = ce_loss +surface_loss
         return total_loss
-dir_img = Path('./data-pre/imgs/train/')
-dir_mask = Path('./data-pre/masks/train/')
-dir_checkpoint = Path('./checkpoints-res-dual-pre/')
+dir_img = Path('./data/imgs/train/')
+dir_mask = Path('./data/masks/train/')
+dir_checkpoint = Path('./checkpoints-res-dual/')
 
 def overlay_two_masks(groundtruth_mask, pred_mask, alpha=0.5, pred_alpha=0.5):
     """
@@ -129,7 +129,7 @@ def train_model(
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
     # Initialize TensorBoard writer
-    log_dir = f'/root/tf-logs/{time.strftime("%Y-%m-%d_%H-%M-%S")}'
+    log_dir = f'/root/tf-logs/{time.strftime("%Y-%m-%d_%H-%M-%S")}/{model.name}'
     writer = SummaryWriter(log_dir=log_dir)
 
     logging.info(f'''Starting training:
@@ -220,11 +220,14 @@ def train_model(
                     if global_step % division_step == 0:
                         histograms = {}
                         
-
-                        val_score, acc, iou = evaluate(model, val_loader, device, amp)
+                        #avg_dice_score, avg_pixel_accuracy, avg_iou, avg_f1, avg_recall, avg_precision
+                        val_score, acc, iou,f1,recall,precision = evaluate(model, val_loader, device, amp)
                         writer.add_scalar('Dice/Val-dual-res', val_score, global_step)
                         writer.add_scalar('Accuracy/Val-dual-res', acc, global_step)
                         writer.add_scalar('IoU/Val-dual-res', iou, global_step)
+                        writer.add_scalar('f1/Val-dual-res', f1, global_step)
+                        writer.add_scalar('recall/Val-dual-res', recall, global_step)
+                        writer.add_scalar('precision/Val-dual-res', precision, global_step)
                         scheduler.step(val_score)
 
                         logging.info('Validation Dice score: {}'.format(val_score))
@@ -247,11 +250,12 @@ def train_model(
                             pass
         # Save checkpoints
         if save_checkpoint:
-            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
-            state_dict = model.state_dict()
-            state_dict['mask_values'] = dataset.mask_values
-            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
-            logging.info(f'Checkpoint {epoch} saved!')
+            if epoch==epochs:
+                Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+                state_dict = model.state_dict()
+                state_dict['mask_values'] = dataset.mask_values
+                torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+                logging.info(f'Checkpoint {epoch} saved!')
 
     # Close TensorBoard writer
     writer.close()

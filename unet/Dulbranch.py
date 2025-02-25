@@ -13,7 +13,7 @@ class DualBranchUNetCBAMResnet(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
-
+        self.name="DBUC"
         factor = 2 if bilinear else 1
 
         # # 使用 ResNet50 作为特征提取器
