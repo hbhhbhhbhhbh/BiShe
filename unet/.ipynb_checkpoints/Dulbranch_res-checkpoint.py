@@ -42,46 +42,41 @@ class DualBranchUNetCBAMResnet(nn.Module):
         self.edge_outc = OutConv(64, n_classes)
 
         # CBAM 注意力机制
-        self.cbam = CBAM(512)
-
+        self.cbam= CBAM(64)
+        self.cbam1 = CBAM(128)
+        self.cbam2 = CBAM(256)
+        self.cbam3 = CBAM(512)
+        self.cbam4 = CBAM(1024 // factor)
         # 边缘检测模块
         self.edge_detector = EdgeDetectionModule()
-
-        # 调整 ResNet 特征维度的卷积层
-        # self.resnet_adapter = nn.Conv2d(2048, 1024, kernel_size=1, bias=False)
 
     def forward(self, x):
         # 使用 UNet 的下采样模块提取特征
         x1 = self.inc(x)
+        x1 = self.cbam(x1)
         x2 = self.down1(x1)
+        x2 = self.cbam1(x2)
         x3 = self.down2(x2)
+        x3 = self.cbam2(x3)
         x4 = self.down3(x3)
+        x4 = self.cbam3(x4)
         x5 = self.down4(x4)
-
+        
         # 使用 ResNet 提取特征
         resnet_feature = self.resnet.forward(x)
-        # resnet_feature = self.resnet_adapter(resnet_features[-1])  # 调整 ResNet 特征维度
-        
         # 融合 ResNet 和 UNet 的特征
-        
         combined_feature = torch.cat([x5, resnet_feature[-1]], dim=1)  # 拼接特征
         x5 = self.feature_fusion(combined_feature)
-        # 主体分割分支
+         # up
         x = self.up1(x5, x4)
-        x = self.cbam(x)
+        x = self.cbam3(x)
         x = self.up2(x, x3)
+        x = self.cbam2(x)
         x = self.up3(x, x2)
+        x = self.cbam1(x)
         x = self.up4(x, x1)
+        x = self.cbam(x)
         logits = self.outc(x)
-
-#         # 边缘分割分支
-#         edge_x = self.edge_up1(x5, x4)
-#         edge_x = self.cbam(edge_x)
-#         edge_x = self.edge_up2(edge_x, x3)
-#         edge_x = self.edge_up3(edge_x, x2)
-#         edge_x = self.edge_up4(edge_x, x1)
-#         edge_logits = self.edge_outc(edge_x)
-
         # 特征融合
         edge_features = self.edge_detector(logits)
         fused_logits = logits + edge_features

@@ -18,6 +18,7 @@ import wandb
 import numpy as np
 import matplotlib.pyplot as plt
 from evaluate import evaluate
+from unet.unet_model import UNet
 from unet.Dulbranch_res import DualBranchUNetCBAMResnet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
@@ -42,10 +43,11 @@ class CombinedLoss(nn.Module):
         # print("ce_loss :",ce_loss)
         print("surface_loss: ",surface_loss)
         writer.add_scalar('surface_loss/surface_loss', surface_loss, global_step)
-        total_loss = ce_loss +surface_loss
+        total_loss = ce_loss +surface_loss*self.surface_loss_weight
+        writer.add_scalar('surface_loss/surface_loss_weight', self.surface_loss_weight, global_step)
         return total_loss
-dir_img = Path('./data/imgs/train/')
-dir_mask = Path('./data/masks/train/')
+dir_img = Path('./data-pre/imgs/train/')
+dir_mask = Path('./data-pre/masks/train/')
 dir_checkpoint = Path('./checkpoints-res-dual/')
 
 def overlay_two_masks(groundtruth_mask, pred_mask, alpha=0.5, pred_alpha=0.5):
@@ -149,7 +151,7 @@ def train_model(
                               lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
-    criterion = CombinedLoss(idc=[1], surface_loss_weight=0.5)
+    criterion = CombinedLoss(idc=[1], surface_loss_weight=1)
     global_step = 0
 
     # 5. Begin training
@@ -190,8 +192,8 @@ def train_model(
                 writer.add_scalar('Loss/Train-dual-res', total_loss.item(), global_step)
                 writer.add_scalar('Learning Rate-dual-res', optimizer.param_groups[0]['lr'], global_step)
                 pbar.set_postfix(**{'loss (batch)': total_loss.item()})
-                if epoch >epoch*0.8:
-                    criterion.surface_loss_weight=1.5
+                # if epoch >epoch*0.8:
+                #     criterion.surface_loss_weight=1.5
                 if global_step % 50 == 0:  # Log every 100 steps
                     # writer.add_image('Train/Image', images[0], global_step)
                     # writer.add_image('Train/Mask', true_masks[0].unsqueeze(0), global_step)  # Add channel dimension
@@ -229,8 +231,9 @@ def train_model(
                         writer.add_scalar('recall/Val-dual-res', recall, global_step)
                         writer.add_scalar('precision/Val-dual-res', precision, global_step)
                         scheduler.step(val_score)
-
-                        logging.info('Validation Dice score: {}'.format(val_score))
+                        if scheduler.num_bad_epochs > 3:  # 如果学习率调度器触发了 bad epochs
+                            criterion.surface_loss_weight = min(2.0, criterion.surface_loss_weight + 0.2)
+                        # logging.info('Validation Dice score: {}'.format(val_score))
                         try:
                             experiment.log({
                                 'learning rate': optimizer.param_groups[0]['lr'],
