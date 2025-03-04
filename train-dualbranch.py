@@ -41,7 +41,7 @@ class CombinedLoss(nn.Module):
         # print("edge: ",edge_logits)
         surface_loss = self.surface_loss(edge_logits, dist_maps)
         # print("ce_loss :",ce_loss)
-        print("surface_loss: ",surface_loss)
+        # print("surface_loss: ",surface_loss)
         writer.add_scalar('surface_loss/surface_loss', surface_loss, global_step)
         total_loss = ce_loss +surface_loss*self.surface_loss_weight
         writer.add_scalar('surface_loss/surface_loss_weight', self.surface_loss_weight, global_step)
@@ -172,13 +172,13 @@ def train_model(
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     masks_pred, edge_logits = model(images)
                     loss = criterion(masks_pred, edge_logits, true_masks, dist_maps,writer,global_step)
-                    print("masks_pred: ",masks_pred.shape)
+                    # print("masks_pred: ",masks_pred.shape)
                     total_loss = loss+dice_loss(
                             F.softmax(masks_pred, dim=1).float(),
                             F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
                             multiclass=True
                         )
-                    print("loss: ",total_loss)
+                    # print("loss: ",total_loss)
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(total_loss).backward()
                 grad_scaler.unscale_(optimizer)
@@ -266,7 +266,7 @@ def train_model(
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=5, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=12, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
